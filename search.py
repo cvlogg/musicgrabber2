@@ -200,6 +200,7 @@ def _search_monochrome_api(query: str, limit: int) -> list[dict]:
             "slskd_filename": None,
             # Extra Monochrome metadata — available for richer tagging at download time
             "monochrome_album": album_obj.get("title"),
+            "monochrome_album_id": str(album_obj.get("id", "")) if album_obj.get("id") else None,
             "monochrome_album_cover": album_obj.get("cover"),
             "monochrome_isrc": item.get("isrc"),
             "monochrome_explicit": item.get("explicit", False),

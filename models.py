@@ -17,7 +17,7 @@ class DownloadRequest(BaseModel):
     title: str
     artist: Optional[str] = None
     search_token: Optional[str] = None
-    download_type: str = "single"  # "single" or "playlist"
+    download_type: str = "single"  # "single", "playlist", or "album"
     convert_to_flac: bool = DEFAULT_CONVERT_TO_FLAC  # Whether to convert to FLAC or keep original format
     # Source routing
     source: str = "youtube"  # "youtube", "soundcloud", "monochrome", or "soulseek"
@@ -25,6 +25,8 @@ class DownloadRequest(BaseModel):
     # Soulseek-specific fields
     slskd_username: Optional[str] = None
     slskd_filename: Optional[str] = None
+    # Album-specific fields
+    album_id: Optional[str] = None  # Monochrome album ID for album downloads
 
 class PlaylistFetchRequest(BaseModel):
     url: str  # Spotify, Amazon Music, etc. playlist URL
@@ -64,6 +66,7 @@ class SettingsUpdate(BaseModel):
     min_audio_bitrate: Optional[int] = None
     singles_subdir: Optional[str] = None
     playlists_subdir: Optional[str] = None
+    albums_subdir: Optional[str] = None
     organise_by_artist: Optional[bool] = None
     # Soulseek/slskd
     slskd_url: Optional[str] = None
@@ -110,6 +113,7 @@ class SearchResult(BaseModel):
     slskd_filename: Optional[str] = None
     # Monochrome-specific extras (available when source == "monochrome")
     album: Optional[str] = None  # Album title from Tidal metadata
+    album_id: Optional[str] = None  # Album ID for full album downloads (Monochrome only)
 
 class BlacklistRequest(BaseModel):
     """Report a bad track / block an uploader."""

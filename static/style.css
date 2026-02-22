@@ -599,6 +599,31 @@ h1 {
     color: white;
 }
 
+.album-download-btn {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+    font-family: inherit;
+}
+
+.album-download-btn:hover {
+    background: var(--accent);
+    color: #000;
+    border-color: var(--accent);
+}
+
+.album-download-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
 .result-item.soulseek .result-thumb {
     background: linear-gradient(135deg, #4a9eff 0%, #2d7dd2 100%);
     display: flex;

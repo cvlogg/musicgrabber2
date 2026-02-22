@@ -410,7 +410,7 @@ def _is_source_branding(text: str) -> bool:
     )
 
 
-def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str = "", year: str = None):
+def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str = "", year: str = None, tracknumber: int = None):
     """Apply metadata to audio file using mutagen (supports multiple formats)"""
     try:
         suffix = file_path.suffix.lower()
@@ -423,6 +423,8 @@ def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str 
                 audio["ALBUM"] = album
             if year:
                 audio["DATE"] = year
+            if tracknumber:
+                audio["TRACKNUMBER"] = str(tracknumber)
             # Wipe yt-dlp source branding from COMMENT tag
             if any(_is_source_branding(c) for c in audio.get("COMMENT", [])):
                 audio["COMMENT"] = []
@@ -445,6 +447,8 @@ def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str 
                 audio["album"] = album
             if year:
                 audio["date"] = year
+            if tracknumber:
+                audio["tracknumber"] = str(tracknumber)
             if any(_is_source_branding(c) for c in audio.get("comment", [])):
                 audio["comment"] = []
             audio.save()
@@ -458,6 +462,8 @@ def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str 
                 audio["\xa9alb"] = [album]
             if year:
                 audio["\xa9day"] = [year]
+            if tracknumber:
+                audio["trkn"] = [(tracknumber, 0)]
             # \xa9cmt is the comment atom
             if any(_is_source_branding(c) for c in audio.get("\xa9cmt", [])):
                 audio["\xa9cmt"] = []
@@ -477,6 +483,8 @@ def apply_metadata_to_file(file_path: Path, artist: str, title: str, album: str 
                     audio["ALBUM"] = album
                 if year:
                     audio["DATE"] = year
+                if tracknumber:
+                    audio["TRACKNUMBER"] = str(tracknumber)
                 if any(_is_source_branding(c) for c in audio.get("COMMENT", [])):
                     audio["COMMENT"] = []
                 audio.save()

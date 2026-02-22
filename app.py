@@ -23,7 +23,7 @@ import base64
 
 from constants import (
     VERSION, MUSIC_DIR, DB_PATH, COOKIES_FILE,
-    MONOCHROME_API_URL, TIMEOUT_MONOCHROME_API,
+    MONOCHROME_API_URL, MONOCHROME_COVER_BASE, TIMEOUT_MONOCHROME_API,
     TIMEOUT_YTDLP_INFO,
     TIMEOUT_YTDLP_PREVIEW,
     TIMEOUT_SLSKD_SEARCH,
@@ -32,7 +32,7 @@ from constants import (
 )
 from db import db_conn, init_db, start_stale_job_monitor, cleanup_stale_jobs, cleanup_old_search_logs
 from settings import (
-    get_setting, get_setting_bool, set_setting, get_singles_dir, get_playlists_dir,
+    get_setting, get_setting_bool, set_setting, get_singles_dir, get_playlists_dir, get_albums_dir,
     SETTINGS_SCHEMA, SENSITIVE_SETTINGS, _get_typed_setting, _is_env_override,
 )
 from models import (
@@ -51,6 +51,7 @@ from search import search_source, search_all, get_available_sources, SOURCE_REGI
 from slskd import slskd_enabled, search_slskd
 from downloads import (
     process_download, process_playlist_download, process_slskd_download,
+    process_album_download, _fetch_album_info,
     rebuild_watched_playlist_m3u,
 )
 from bulk_import import clean_bulk_import_line, start_bulk_import_for_tracks, process_bulk_import_worker
@@ -119,6 +120,7 @@ def get_config():
     organise_by_artist = get_setting_bool("organise_by_artist", True)
     singles_dir = get_singles_dir()
     playlists_dir = get_playlists_dir()
+    albums_dir = get_albums_dir()
 
     # Build human-readable example paths relative to the music root so the
     # frontend can show the user exactly where their files will land.
@@ -138,14 +140,24 @@ def get_config():
             pl_rel = str(playlists_dir)
         playlists_example = f"{pl_rel}/Playlist Name/Artist - Title.flac"
 
+    albums_example = None
+    if albums_dir:
+        try:
+            al_rel = str(albums_dir.relative_to(MUSIC_DIR))
+        except ValueError:
+            al_rel = str(albums_dir)
+        albums_example = f"{al_rel}/Artist - Album Name/01 - Track Title.flac"
+
     return {
         "version": VERSION,
         "default_convert_to_flac": get_setting_bool("default_convert_to_flac", True),
         "audio_format": get_setting("audio_format", "flac"),
         "playlists_subdir": get_setting("playlists_subdir", ""),
+        "albums_subdir": get_setting("albums_subdir", "Albums"),
         "organise_by_artist": organise_by_artist,
         "singles_path_example": singles_example,
         "playlists_path_example": playlists_example,
+        "albums_path_example": albums_example,
         "auth_required": bool(api_key),
         "volume_mounted": _is_volume_mounted()
     }
@@ -824,6 +836,7 @@ def search(request: SearchRequest):
                 slskd_username=item["slskd_username"],
                 slskd_filename=item["slskd_filename"],
                 album=item.get("monochrome_album"),
+                album_id=item.get("monochrome_album_id"),
             ))
 
         search_token = None
@@ -880,6 +893,57 @@ def search_slskd_endpoint(request: SearchRequest):
 
 
 # =============================================================================
+# Album API
+# =============================================================================
+
+@app.get("/api/album")
+def get_album_info(id: str):
+    """Fetch album metadata and track list from the Monochrome/Tidal API.
+
+    Returns album title, artist, cover, and a list of tracks with their IDs,
+    titles, track numbers, and durations. Used by the frontend to show the
+    album contents before queuing a full album download.
+    """
+    if not id:
+        raise HTTPException(status_code=400, detail="Album ID is required")
+
+    album_data = _fetch_album_info(id)
+    if not album_data:
+        raise HTTPException(status_code=404, detail="Album not found or Monochrome API unavailable")
+
+    # Normalise the response for the frontend
+    artist_obj = album_data.get("artist") or {}
+    cover_uuid = album_data.get("cover", "")
+    cover_url = ""
+    if cover_uuid:
+        cover_url = f"{MONOCHROME_COVER_BASE}/{cover_uuid.replace('-', '/')}/640x640.jpg"
+
+    tracks_obj = album_data.get("tracks") or {}
+    raw_tracks = tracks_obj.get("items") or album_data.get("items") or []
+
+    tracks = []
+    for t in raw_tracks:
+        duration_secs = t.get("duration") or 0
+        tracks.append({
+            "id": str(t.get("id", "")),
+            "title": t.get("title", "Unknown"),
+            "trackNumber": t.get("trackNumber"),
+            "duration": parse_duration(duration_secs) if duration_secs else "",
+            "streamReady": t.get("streamReady", True),
+        })
+
+    return {
+        "id": str(album_data.get("id", id)),
+        "title": album_data.get("title", "Unknown Album"),
+        "artist": artist_obj.get("name", "Unknown Artist"),
+        "cover_url": cover_url,
+        "release_date": album_data.get("releaseDate", ""),
+        "tracks": tracks,
+        "track_count": len(tracks),
+    }
+
+
+# =============================================================================
 # Download API
 # =============================================================================
 
@@ -899,8 +963,13 @@ def download(request: DownloadRequest):
         if source == "soulseek" and not (request.slskd_username and request.slskd_filename):
             source = "youtube"  # Fallback if slskd fields missing
 
-        # Validate based on source
-        if source == "youtube":
+        # Validate based on source and download type
+        if request.download_type == "album":
+            if not request.album_id:
+                raise HTTPException(status_code=400, detail="album_id is required for album downloads")
+            if source != "monochrome":
+                raise HTTPException(status_code=400, detail="Album downloads are only supported for Monochrome")
+        elif source == "youtube":
             if not request.video_id or not is_valid_youtube_id(request.video_id):
                 raise HTTPException(status_code=400, detail="Invalid YouTube video ID")
         elif source in URL_BASED_SOURCES:
@@ -914,6 +983,8 @@ def download(request: DownloadRequest):
             source_url = request.source_url
         elif request.download_type == "playlist":
             source_url = f"https://www.youtube.com/playlist?list={request.video_id}" if request.video_id else None
+        elif request.download_type == "album":
+            source_url = f"https://monochrome.tf/album/{request.album_id}"
         else:
             source_url = f"https://www.youtube.com/watch?v={request.video_id}" if request.video_id else None
 
@@ -925,6 +996,13 @@ def download(request: DownloadRequest):
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, request.video_id, title, "queued", "playlist", title, "youtube", int(request.convert_to_flac), source_url, valid_search_token)
             )
+        elif request.download_type == "album":
+            conn.execute(
+                """INSERT INTO jobs (id, video_id, title, artist, status, download_type, playlist_name, source, convert_to_flac, source_url, search_token)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, request.album_id, title, artist or "", "queued", "album", title,
+                 "monochrome", int(request.convert_to_flac), source_url, valid_search_token)
+            )
         else:
             conn.execute(
                 """INSERT INTO jobs (id, video_id, title, artist, status, download_type, source, slskd_username, slskd_filename, convert_to_flac, source_url, search_token)
@@ -934,8 +1012,17 @@ def download(request: DownloadRequest):
             )
         conn.commit()
 
-    # Queue the download based on source
-    if request.download_type == "playlist":
+    # Queue the download based on source and type
+    if request.download_type == "album":
+        spawn_daemon_thread(
+            process_album_download,
+            job_id,
+            request.album_id,
+            artist or "",
+            title,
+            request.convert_to_flac,
+        )
+    elif request.download_type == "playlist":
         spawn_daemon_thread(process_playlist_download, job_id, request.video_id, title, request.convert_to_flac, True)
     elif source == "soulseek":
         spawn_daemon_thread(
@@ -1057,7 +1144,17 @@ def retry_job(job_id: str):
     # Re-queue the job based on source type
     convert_to_flac = bool(job.get("convert_to_flac", 1))
 
-    if job["download_type"] == "playlist":
+    if job["download_type"] == "album":
+        # video_id stores the album_id for album jobs
+        spawn_daemon_thread(
+            process_album_download,
+            job_id,
+            job["video_id"],
+            job.get("artist", ""),
+            job.get("title", ""),
+            convert_to_flac,
+        )
+    elif job["download_type"] == "playlist":
         spawn_daemon_thread(process_playlist_download, job_id, job["video_id"], job["playlist_name"], convert_to_flac, True)
     elif job.get("source") == "soulseek" and job.get("slskd_username") and job.get("slskd_filename"):
         spawn_daemon_thread(
