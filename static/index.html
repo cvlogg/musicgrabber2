@@ -89,16 +89,32 @@
                     </div>
                     <div id="spotifyError" style="margin-top: 8px; font-size: 12px; color: var(--error); display: none;"></div>
                     <div style="margin-top: 6px; display: flex; align-items: center; gap: 6px;">
-                        <span id="playlistServicesHint" style="font-size: 11px; color: var(--text-secondary);">Supported services: Spotify, YouTube, Amazon Music</span>
+                        <span id="playlistServicesHint" style="font-size: 11px; color: var(--text-secondary);">Supported: Spotify, YouTube, Amazon Music playlists · Monochrome album URLs</span>
                         <span
                             id="playlistServicesTooltip"
-                            title="Supported services: Spotify, YouTube, Amazon Music"
+                            title="Paste a Spotify/YouTube/Amazon Music playlist URL to load tracks into the bulk import list. Paste a Monochrome album URL (monochrome.tf/album/...) to queue a full lossless album download."
                             style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); color: var(--text-secondary); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; cursor: help;"
                         >i</span>
                     </div>
                     <div style="margin-top: 6px; font-size: 11px; color: var(--text-secondary);">
                         Large Spotify playlists may take a few seconds to load. YouTube playlists are unlimited.
                     </div>
+                </div>
+
+                <!-- Monochrome album preview card (shown when a Monochrome album URL is pasted) -->
+                <div id="monoAlbumPreview" style="display: none; margin-bottom: 12px; padding: 14px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 12px;">
+                    <div style="display: flex; gap: 14px; align-items: flex-start;">
+                        <img id="monoAlbumCover" src="" alt="" style="width: 80px; height: 80px; border-radius: 8px; object-fit: cover; flex-shrink: 0; display: none;">
+                        <div style="flex: 1; min-width: 0;">
+                            <div id="monoAlbumTitle" style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+                            <div id="monoAlbumArtist" style="font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;"></div>
+                            <div id="monoAlbumMeta" style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;"></div>
+                            <button id="monoAlbumDownloadBtn"
+                                style="padding: 8px 16px; font-size: 13px; font-family: inherit; font-weight: 600; background: #111; color: #fff; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                            >&#128191; Download Full Album</button>
+                        </div>
+                    </div>
+                    <div id="monoAlbumError" style="margin-top: 8px; font-size: 12px; color: var(--error); display: none;"></div>
                 </div>
                 <div style="position: relative;">
                     <textarea
@@ -2084,12 +2100,20 @@
                 return;
             }
 
-            // URL validation - Spotify playlists/albums and Amazon Music playlists
+            // URL validation - Spotify playlists/albums, Amazon Music playlists, and Monochrome albums
             const isSpotify = url.match(/^https?:\/\/open\.spotify\.com\/(playlist|album)\//);
             const isAmazon = url.match(/^https?:\/\/music\.amazon\.[a-z.]+\/(user-playlists|playlists)\//);
-            if (!isSpotify && !isAmazon) {
-                spotifyError.textContent = 'Unsupported URL. Paste a Spotify or Amazon Music playlist link.';
+            const monoAlbumMatch = url.match(/^https?:\/\/(?:www\.)?monochrome\.tf\/album\/(\d+)/);
+            if (!isSpotify && !isAmazon && !monoAlbumMatch) {
+                spotifyError.textContent = 'Unsupported URL. Paste a Spotify/Amazon Music playlist or a Monochrome album link (monochrome.tf/album/...).';
                 spotifyError.style.display = 'block';
+                return;
+            }
+
+            // Monochrome album URL — show album preview card instead of populating the bulk textarea
+            if (monoAlbumMatch) {
+                fetchMonochromeAlbum(monoAlbumMatch[1]);
+                spotifyUrlInput.value = '';
                 return;
             }
 
@@ -2155,6 +2179,104 @@
         spotifyUrlInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
                 fetchSpotifyPlaylist();
+            }
+        });
+
+        // --- Monochrome album download ---
+        let currentMonoAlbum = null;  // Holds the last fetched album data
+
+        async function fetchMonochromeAlbum(albumId) {
+            const previewCard = document.getElementById('monoAlbumPreview');
+            const albumTitle = document.getElementById('monoAlbumTitle');
+            const albumArtist = document.getElementById('monoAlbumArtist');
+            const albumMeta = document.getElementById('monoAlbumMeta');
+            const albumCover = document.getElementById('monoAlbumCover');
+            const downloadBtn = document.getElementById('monoAlbumDownloadBtn');
+            const errorDiv = document.getElementById('monoAlbumError');
+
+            // Reset state
+            currentMonoAlbum = null;
+            errorDiv.style.display = 'none';
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = '⏳ Loading…';
+            previewCard.style.display = 'block';
+            albumTitle.textContent = 'Loading album…';
+            albumArtist.textContent = '';
+            albumMeta.textContent = '';
+            albumCover.style.display = 'none';
+
+            try {
+                const response = await apiFetch(`/api/album?id=${encodeURIComponent(albumId)}`);
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Album not found');
+                }
+                const album = await response.json();
+                currentMonoAlbum = album;
+
+                albumTitle.textContent = album.title || 'Unknown Album';
+                albumArtist.textContent = album.artist || '';
+                const trackWord = album.track_count === 1 ? 'track' : 'tracks';
+                const yearPart = album.release_date ? ` · ${album.release_date.slice(0, 4)}` : '';
+                albumMeta.textContent = `${album.track_count} ${trackWord}${yearPart} · Monochrome (lossless FLAC)`;
+
+                if (album.cover_url) {
+                    albumCover.src = album.cover_url;
+                    albumCover.style.display = 'block';
+                }
+
+                downloadBtn.disabled = false;
+                downloadBtn.innerHTML = '&#128191; Download Full Album';
+            } catch (err) {
+                albumTitle.textContent = 'Could not load album';
+                errorDiv.textContent = err.message;
+                errorDiv.style.display = 'block';
+                downloadBtn.innerHTML = '&#128191; Download Full Album';
+                downloadBtn.disabled = true;
+            }
+        }
+
+        document.getElementById('monoAlbumDownloadBtn').addEventListener('click', async () => {
+            if (!currentMonoAlbum) return;
+            const downloadBtn = document.getElementById('monoAlbumDownloadBtn');
+            const errorDiv = document.getElementById('monoAlbumError');
+
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = '⏳ Queueing…';
+            errorDiv.style.display = 'none';
+
+            try {
+                const response = await apiFetch('/api/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        video_id: String(currentMonoAlbum.id),
+                        title: currentMonoAlbum.title,
+                        artist: currentMonoAlbum.artist,
+                        album_id: String(currentMonoAlbum.id),
+                        download_type: 'album',
+                        convert_to_flac: convertToFlacCheckbox.checked,
+                        source: 'monochrome',
+                    })
+                });
+
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Failed to queue album');
+                }
+
+                showToast(`Album queued ✓ (${escapeHtml(currentMonoAlbum.title)})`);
+                downloadBtn.textContent = '✓ Queued';
+                // Hide preview card after a short delay
+                setTimeout(() => {
+                    document.getElementById('monoAlbumPreview').style.display = 'none';
+                    currentMonoAlbum = null;
+                }, 2000);
+            } catch (err) {
+                errorDiv.textContent = err.message;
+                errorDiv.style.display = 'block';
+                downloadBtn.disabled = false;
+                downloadBtn.innerHTML = '&#128191; Download Full Album';
             }
         });
 

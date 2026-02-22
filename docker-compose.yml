@@ -1,6 +1,11 @@
 services:
   music-grabber:
+    # Option A (default): build the image locally from source
     build: .
+    # Option B: pull the pre-built image from GitHub Container Registry.
+    # Comment out "build: ." above and uncomment the line below, replacing
+    # <your-github-username> with your GitHub username (or the repo owner).
+    # image: ghcr.io/cvlogg/musicgrabber2:latest
     container_name: music-grabber
     restart: unless-stopped
     # Chromium needs more shared memory for headless browser - Spotify playlists over 100 tracks WILL fail without this
