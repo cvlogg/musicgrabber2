@@ -82,6 +82,7 @@ SETTINGS_SCHEMA = {
     "min_audio_bitrate": {"type": "int", "default": 0, "env": "MIN_AUDIO_BITRATE"},
     "singles_subdir": {"type": "str", "default": "Singles", "env": "SINGLES_SUBDIR"},
     "playlists_subdir": {"type": "str", "default": "", "env": "PLAYLISTS_SUBDIR"},
+    "albums_subdir": {"type": "str", "default": "Albums", "env": "ALBUMS_SUBDIR"},
     "organise_by_artist": {"type": "bool", "default": True, "env": "ORGANISE_BY_ARTIST"},
     # Soulseek/slskd
     "slskd_url": {"type": "str", "default": "", "env": "SLSKD_URL"},
@@ -152,6 +153,20 @@ def get_playlists_dir() -> Path | None:
     rather than being mixed in with singles.
     """
     subdir = get_setting("playlists_subdir", "").strip()
+    if not subdir:
+        return None  # Feature disabled — fall back to Singles behaviour
+    if subdir == ".":
+        return MUSIC_DIR
+    return MUSIC_DIR / subdir
+
+
+def get_albums_dir() -> Path | None:
+    """Get the albums download directory, or None if disabled (empty string).
+
+    When set, album downloads go to e.g. /music/Albums/Artist - Album Name/
+    rather than being mixed in with singles.
+    """
+    subdir = get_setting("albums_subdir", "Albums").strip()
     if not subdir:
         return None  # Feature disabled — fall back to Singles behaviour
     if subdir == ".":

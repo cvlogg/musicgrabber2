@@ -278,6 +278,19 @@
                         <span style="font-size: 11px; color: var(--text-secondary);">Separate folder for playlist downloads. Leave disabled to keep playlist tracks in Singles. When set, playlist tracks are saved as <code>Artist - Title.ext</code> inside a named subfolder.</span>
                         <span id="playlistsPathPreview" style="font-size: 11px; color: var(--text-secondary); font-family: monospace; margin-top: 2px;"></span>
                     </div>
+                    <div class="settings-row">
+                        <label for="settingAlbumsSubdir">Albums Subfolder</label>
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <select id="settingAlbumsSubdir" style="width: 320px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-primary); color: var(--text-primary); font-size: 14px;">
+                                <option value="Albums">/music/Albums</option>
+                            </select>
+                        </div>
+                        <div id="customAlbumsSubdirRow" style="display:none; margin-top: 6px;">
+                            <input type="text" id="customAlbumsSubdirInput" placeholder="Path under /music (e.g. Albums)" style="width: 320px;">
+                        </div>
+                        <span style="font-size: 11px; color: var(--text-secondary);">Folder for full album downloads from Monochrome. Tracks are saved as <code>Artist - Album/01 - Track.flac</code>.</span>
+                        <span id="albumsPathPreview" style="font-size: 11px; color: var(--text-secondary); font-family: monospace; margin-top: 2px;"></span>
+                    </div>
                 </div>
             </div>
 
@@ -1165,6 +1178,7 @@
                             <span class="source-badge ${r.source}">${getSourceBadge(r.source)}</span>
                             ${r.quality ? `<span class="quality-badge ${getQualityBadgeClass(r.quality)}">${formatQualityLabel(r.quality)}</span>` : ''}
                             ${r.duration ? `<span class="result-duration">${r.duration}</span>` : ''}
+                            ${r.source === 'monochrome' && r.album_id ? `<button class="album-download-btn" data-index="${index}" title="Download full album: ${escapeHtml(r.album || 'Album')}">&#128191; Album</button>` : ''}
                         </div>
                     </div>
                 </div>
@@ -1206,6 +1220,15 @@
                         } else {
                             startPreview(videoId, item, result);
                         }
+                    });
+                }
+
+                // Album download button — download the full album (Monochrome only)
+                const albumBtn = item.querySelector('.album-download-btn');
+                if (albumBtn) {
+                    albumBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        downloadAlbum(result, item);
                     });
                 }
             });
@@ -1265,6 +1288,56 @@
                 downloadingIds.delete(result.video_id);
                 element.classList.remove('downloading');
                 showToast('Failed to queue', true);
+            }
+        }
+
+        async function downloadAlbum(result, element) {
+            if (!result.album_id) {
+                showToast('No album ID available', true);
+                return;
+            }
+
+            const albumBtn = element.querySelector('.album-download-btn');
+            if (albumBtn) {
+                albumBtn.disabled = true;
+                albumBtn.textContent = '⏳ Queueing…';
+            }
+
+            showToast(`Queueing album download…`, false);
+
+            try {
+                const payload = {
+                    video_id: result.video_id,
+                    title: result.album || result.title,
+                    artist: result.channel,
+                    album_id: result.album_id,
+                    download_type: 'album',
+                    convert_to_flac: convertToFlacCheckbox.checked,
+                    source: 'monochrome',
+                    source_url: result.source_url || null,
+                };
+
+                const response = await apiFetch('/api/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Album download failed');
+                }
+
+                showToast(`Album queued ✓ (${escapeHtml(result.album || 'Album')})`);
+                if (albumBtn) {
+                    albumBtn.textContent = '✓ Queued';
+                }
+            } catch (error) {
+                showToast(error.message || 'Failed to queue album', true);
+                if (albumBtn) {
+                    albumBtn.disabled = false;
+                    albumBtn.textContent = '&#128191; Album';
+                }
             }
         }
 
@@ -2660,6 +2733,7 @@
             'min_audio_bitrate': 'settingMinBitrate',
             'singles_subdir': 'settingSinglesSubdir',
             'playlists_subdir': 'settingPlaylistsSubdir',
+            'albums_subdir': 'settingAlbumsSubdir',
             'organise_by_artist': 'settingOrganiseByArtist',
             'slskd_url': 'settingSlskdUrl',
             'slskd_user': 'settingSlskdUser',
@@ -2756,6 +2830,8 @@
                 await _populateSubdirDropdown(settings['singles_subdir'] || 'Singles');
                 // Populate playlists subfolder dropdown
                 await _populatePlaylistsSubdirDropdown(settings['playlists_subdir'] || '');
+                // Populate albums subfolder dropdown
+                await _populateAlbumsSubdirDropdown(settings['albums_subdir'] || 'Albums');
 
                 // Live path preview: update whenever organise-by-artist toggle changes
                 const organiseToggle = document.getElementById('settingOrganiseByArtist');
@@ -2972,6 +3048,95 @@
             _updatePathPreviews();
         }
 
+        async function _populateAlbumsSubdirDropdown(currentValue) {
+            const select = document.getElementById('settingAlbumsSubdir');
+            const customRow = document.getElementById('customAlbumsSubdirRow');
+            const customInput = document.getElementById('customAlbumsSubdirInput');
+            if (!select || !customRow || !customInput) return;
+
+            const currentRaw = String(currentValue || 'Albums').trim();
+            const current = currentRaw === '.' ? '.' : (_normaliseSubdirPath(currentRaw) || 'Albums');
+
+            let dirs = [];
+            try {
+                const resp = await apiFetch('/api/music-dirs?recursive=true&max_depth=2');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    dirs = Array.isArray(data.directories) ? data.directories : [];
+                }
+            } catch (e) {
+                console.warn('Could not fetch music directories:', e);
+            }
+
+            const unique = new Set();
+            for (const dir of dirs) {
+                const normalised = _normaliseSubdirPath(dir);
+                if (normalised && normalised !== '.') {
+                    unique.add(normalised);
+                }
+            }
+
+            // Always include "Albums" as the default option
+            unique.add('Albums');
+            if (current && current !== '.') {
+                unique.add(current);
+            }
+
+            const sortedDirs = Array.from(unique).sort((a, b) =>
+                a.localeCompare(b, undefined, { sensitivity: 'base' })
+            );
+
+            select.innerHTML = '';
+
+            const albumsOpt = document.createElement('option');
+            albumsOpt.value = 'Albums';
+            albumsOpt.textContent = '/music/Albums';
+            select.appendChild(albumsOpt);
+
+            const rootOpt = document.createElement('option');
+            rootOpt.value = '.';
+            rootOpt.textContent = '/music (root)';
+            select.appendChild(rootOpt);
+
+            for (const relPath of sortedDirs.filter(d => d !== 'Albums')) {
+                const opt = document.createElement('option');
+                opt.value = relPath;
+                opt.textContent = `/music/${relPath}`;
+                select.appendChild(opt);
+            }
+
+            const customOpt = document.createElement('option');
+            customOpt.value = SUBDIR_CUSTOM_VALUE;
+            customOpt.textContent = 'Custom path\u2026';
+            select.appendChild(customOpt);
+
+            const currentIsKnown = current === '.' || sortedDirs.includes(current);
+            customInput.disabled = !!select.disabled;
+            if (currentIsKnown) {
+                select.value = current;
+                customRow.style.display = 'none';
+                customInput.value = '';
+            } else {
+                select.value = SUBDIR_CUSTOM_VALUE;
+                customRow.style.display = 'block';
+                customInput.value = current;
+            }
+
+            select.onchange = () => {
+                if (select.value === SUBDIR_CUSTOM_VALUE) {
+                    customRow.style.display = 'block';
+                    customInput.focus();
+                    _updatePathPreviews();
+                    return;
+                }
+                customRow.style.display = 'none';
+                customInput.value = '';
+                _updatePathPreviews();
+            };
+            customInput.oninput = _updatePathPreviews;
+            _updatePathPreviews();
+        }
+
         async function _updateCookieExpiryHint() {
             const hint = document.getElementById('cookieExpiryHint');
             if (!hint) return;
@@ -3007,12 +3172,15 @@
         function _updatePathPreviews() {
             const singlesEl = document.getElementById('singlesPathPreview');
             const playlistsEl = document.getElementById('playlistsPathPreview');
-            if (!singlesEl && !playlistsEl) return;
+            const albumsEl = document.getElementById('albumsPathPreview');
+            if (!singlesEl && !playlistsEl && !albumsEl) return;
 
             const singlesSelect = document.getElementById('settingSinglesSubdir');
             const singlesCustom = document.getElementById('customSubdirInput');
             const playlistsSelect = document.getElementById('settingPlaylistsSubdir');
             const playlistsCustom = document.getElementById('customPlaylistsSubdirInput');
+            const albumsSelect = document.getElementById('settingAlbumsSubdir');
+            const albumsCustom = document.getElementById('customAlbumsSubdirInput');
             const organiseToggle = document.getElementById('settingOrganiseByArtist');
 
             const singlesVal = singlesSelect && singlesSelect.value === SUBDIR_CUSTOM_VALUE
@@ -3021,6 +3189,9 @@
             const playlistsVal = playlistsSelect && playlistsSelect.value === SUBDIR_CUSTOM_VALUE
                 ? (playlistsCustom ? playlistsCustom.value.trim() : '')
                 : (playlistsSelect ? playlistsSelect.value : '');
+            const albumsVal = albumsSelect && albumsSelect.value === SUBDIR_CUSTOM_VALUE
+                ? (albumsCustom ? albumsCustom.value.trim() : '')
+                : (albumsSelect ? albumsSelect.value : '');
             const organise = organiseToggle ? organiseToggle.checked : true;
 
             if (singlesEl) {
@@ -3044,11 +3215,18 @@
                     playlistsEl.textContent = 'Files saved to: ' + p;
                 }
             }
+
+            if (albumsEl) {
+                let p = '/music';
+                if (albumsVal && albumsVal !== '.') p += '/' + albumsVal;
+                p += '/Artist - Album Name/01 - Track Title.flac';
+                albumsEl.textContent = 'Files saved to: ' + p;
+            }
         }
 
         function _injectSettingsClearButtons() {
             // Skip these — they already have dedicated clear mechanisms
-            const skipIds = new Set(['settingYoutubeCookies', 'settingSmtpPort', 'settingMinBitrate', 'customSubdirInput', 'customPlaylistsSubdirInput']);
+            const skipIds = new Set(['settingYoutubeCookies', 'settingSmtpPort', 'settingMinBitrate', 'customSubdirInput', 'customPlaylistsSubdirInput', 'customAlbumsSubdirInput']);
 
             for (const row of document.querySelectorAll('.settings-row')) {
                 const input = row.querySelector('input[type="text"], input[type="password"], input[type="number"]');
@@ -3160,6 +3338,17 @@
                                 value = _normaliseSubdirPath(customInput?.value || '') || 'Playlists';
                             } else {
                                 value = _normaliseSubdirPath(value);
+                            }
+                        }
+                        // Albums subfolder: same pattern, defaults to "Albums"
+                        if (key === 'albums_subdir') {
+                            if (value === '.' ) {
+                                // keep as-is ('.' = root)
+                            } else if (value === SUBDIR_CUSTOM_VALUE) {
+                                const customInput = document.getElementById('customAlbumsSubdirInput');
+                                value = _normaliseSubdirPath(customInput?.value || '') || 'Albums';
+                            } else {
+                                value = _normaliseSubdirPath(value) || 'Albums';
                             }
                         }
                         // For sensitive fields with hidden values (null), only send if user entered something

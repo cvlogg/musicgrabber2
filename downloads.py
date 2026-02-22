@@ -29,7 +29,7 @@ from constants import (
 from db import db_conn
 from metadata import lookup_metadata, fetch_lyrics, save_lyrics_file, apply_metadata_to_file
 from notifications import send_notification
-from settings import get_setting, get_setting_bool, get_setting_int, get_singles_dir, get_download_dir, get_playlists_dir
+from settings import get_setting, get_setting_bool, get_setting_int, get_singles_dir, get_download_dir, get_playlists_dir, get_albums_dir
 from slskd import (
     download_from_slskd, extract_track_info_from_path,
     search_slskd, should_retry_slskd_error,
@@ -1194,6 +1194,197 @@ def _process_monochrome_download(job_id: str, track_id: str, convert_to_flac: bo
             source=source_label,
             status="failed",
             error=str(e)
+        )
+
+
+def _fetch_album_info(album_id: str) -> dict | None:
+    """Fetch album metadata and track list from the Monochrome API."""
+    try:
+        resp = httpx.get(
+            f"{MONOCHROME_API_URL}/album/",
+            params={"id": album_id},
+            timeout=TIMEOUT_MONOCHROME_API,
+        )
+        resp.raise_for_status()
+        return resp.json().get("data")
+    except Exception as e:
+        print(f"Monochrome album info lookup failed: {e}")
+        return None
+
+
+def process_album_download(job_id: str, album_id: str, album_artist: str, album_title: str, convert_to_flac: bool = True):
+    """Download all tracks of a Monochrome/Tidal album.
+
+    Saves tracks to Albums/Artist - Album Title/ with track-number prefixed
+    filenames (e.g. '01 - Track Name.flac') and generates an M3U playlist.
+    Falls back to Singles if no albums directory is configured.
+    """
+    source_label = "monochrome"
+
+    try:
+        _update_job(job_id, status="downloading")
+
+        # Fetch album metadata and track list
+        album_data = _fetch_album_info(album_id)
+        if not album_data:
+            raise Exception(f"Failed to get album info for Monochrome album {album_id}")
+
+        album_title = album_data.get("title", album_title or "Unknown Album")
+        artist_obj = album_data.get("artist") or {}
+        album_artist = artist_obj.get("name", album_artist or "Unknown Artist")
+        cover_uuid = album_data.get("cover", "")
+
+        # Tracks may be under data.tracks.items or data.items depending on API version
+        tracks_obj = album_data.get("tracks") or {}
+        tracks = tracks_obj.get("items") or album_data.get("items") or []
+
+        if not tracks:
+            raise Exception("No tracks found in album")
+
+        _update_job(job_id, total_tracks=len(tracks), title=album_title, artist=album_artist, uploader=album_artist)
+
+        # Determine the album directory
+        albums_dir = get_albums_dir()
+        safe_artist = sanitize_filename(album_artist)
+        safe_album = sanitize_filename(album_title)
+
+        if albums_dir:
+            album_dir = albums_dir / f"{safe_artist} - {safe_album}"
+        else:
+            # No albums dir configured — nest under Singles/Artist/Album
+            album_dir = get_singles_dir() / safe_artist / safe_album
+
+        album_dir.mkdir(parents=True, exist_ok=True)
+
+        downloaded_files = []
+        completed_tracks = 0
+        failed_tracks = 0
+        skipped_tracks = 0
+
+        for track in tracks:
+            track_id = str(track.get("id", ""))
+            track_title = track.get("title", "Unknown")
+            track_number = track.get("trackNumber") or track.get("volumeNumber")
+            track_label = track_title
+
+            if not track_id:
+                failed_tracks += 1
+                continue
+
+            try:
+                # Check for duplicates
+                existing_file = check_duplicate(album_artist, track_title)
+                if existing_file:
+                    skipped_tracks += 1
+                    downloaded_files.append(existing_file.name)
+                    continue
+
+                # Build filename: 01 - Track Title.flac
+                safe_track_title = sanitize_filename(track_title)
+                track_num_str = f"{int(track_number):02d}" if track_number else "00"
+                filename_stem = f"{track_num_str} - {safe_track_title}"
+                output_path = album_dir / f"{filename_stem}.flac"
+
+                # Download the FLAC from Monochrome
+                _download_monochrome_direct(track_id, output_path)
+
+                if not output_path.exists():
+                    raise Exception("Download completed but FLAC file not found")
+
+                set_file_permissions(output_path)
+
+                # Embed cover art from Tidal CDN
+                _embed_monochrome_cover(output_path, cover_uuid)
+
+                # Probe audio quality
+                audio_quality, bitrate_kbps = probe_audio_quality(output_path)
+                min_bitrate = get_setting_int("min_audio_bitrate", 0)
+                if min_bitrate and bitrate_kbps and bitrate_kbps < min_bitrate:
+                    output_path.unlink(missing_ok=True)
+                    raise Exception(f"Audio quality too low ({bitrate_kbps}kbps, minimum is {min_bitrate}kbps)")
+
+                # Apply metadata — Tidal data is authoritative; only use MusicBrainz for the year
+                year = None
+                if get_setting_bool("enable_musicbrainz", True):
+                    mb_metadata = lookup_metadata(album_artist, track_title, output_path)
+                    if mb_metadata:
+                        year = mb_metadata.get("year")
+                apply_metadata_to_file(output_path, album_artist, track_title, album_title, year, tracknumber=track_number)
+
+                # Fetch and save lyrics
+                lyrics = fetch_lyrics(album_artist, track_title)
+                if lyrics:
+                    save_lyrics_file(output_path, lyrics)
+
+                downloaded_files.append(output_path.name)
+                completed_tracks += 1
+
+            except Exception as track_error:
+                print(f"Album track failed: {track_label} - {track_error}")
+                failed_tracks += 1
+            finally:
+                _update_job(
+                    job_id,
+                    completed_tracks=completed_tracks,
+                    failed_tracks=failed_tracks,
+                    skipped_tracks=skipped_tracks,
+                )
+
+        # Generate M3U playlist for the album
+        if downloaded_files:
+            m3u_path = album_dir / f"{safe_album}.m3u"
+            with open(m3u_path, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+                for filename in downloaded_files:
+                    f.write(f"{filename}\n")
+            set_file_permissions(m3u_path)
+            _update_job(job_id, m3u_path=str(album_dir.relative_to(MUSIC_DIR) / m3u_path.name))
+
+        # Trigger library rescans if configured
+        trigger_navidrome_scan()
+        trigger_jellyfin_scan()
+
+        # Final status
+        final_status = "completed"
+        error_message = None
+        if failed_tracks:
+            final_status = "completed_with_errors"
+            error_message = f"{failed_tracks} track(s) failed"
+            if skipped_tracks:
+                error_message += f", {skipped_tracks} skipped (duplicates)"
+
+        _update_job(
+            job_id,
+            status=final_status,
+            error=error_message,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        print(f"Monochrome album: Downloaded {completed_tracks}/{len(tracks)} tracks for '{album_artist} - {album_title}'")
+
+        send_notification(
+            notification_type="playlist",
+            title=album_title,
+            playlist_name=f"{album_artist} - {album_title}",
+            source=source_label,
+            status=final_status,
+            error=error_message,
+            track_count=len(tracks),
+            failed_count=failed_tracks,
+            skipped_count=skipped_tracks,
+        )
+
+    except Exception as e:
+        print(f"Monochrome album download failed: {e}")
+        _update_job(job_id, status="failed", error=str(e), completed_at=datetime.now(timezone.utc).isoformat())
+
+        send_notification(
+            notification_type="error",
+            title=album_title,
+            artist=album_artist,
+            source=source_label,
+            status="failed",
+            error=str(e),
         )
 
 
